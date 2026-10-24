@@ -54,6 +54,9 @@ footer{padding:14px 20px;border-top:1px solid var(--line);display:grid;gap:8px}
 .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{flex:1;border:0;border-radius:0}
 .seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
+.styles{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.styles button{font-size:13px;padding:7px 8px}
+.styles button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chips button{font-size:12px;padding:4px 9px;border-radius:999px}
 .chips button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
@@ -101,10 +104,13 @@ footer{padding:14px 20px;border-top:1px solid var(--line);display:grid;gap:8px}
   <div class="ex-box">
     <div class="ex-prev"><canvas id="exCanvas"></canvas></div>
     <div class="ex-ctrl">
-      <label>용도
-        <div class="seg" id="exType">
-          <button data-t="report" aria-pressed="true">보고서용</button>
-          <button data-t="poster" aria-pressed="false">홍보 맛지도</button>
+      <label>스타일
+        <div class="styles" id="exType">
+          <button data-t="report" aria-pressed="true">보고서 지도</button>
+          <button data-t="illust" aria-pressed="false">일러스트 지도</button>
+          <button data-t="line" aria-pressed="false">코스 노선도</button>
+          <button data-t="cards" aria-pressed="false">카드뉴스</button>
+          <button data-t="poster" aria-pressed="false">밤하늘 맛지도</button>
         </div>
       </label>
       <label>표시할 업종
@@ -322,9 +328,13 @@ $("xlsxBtn").onclick = async () => {
 const FONT = getComputedStyle(document.body).fontFamily;
 const POSTER_COLORS = ["#FFD166","#FF8FA3","#7BDFF2","#B5E48C","#C3A6FF","#FFB86B"];
 let exType = "report";
+const PLACE = DATA.areas[0].replace(/[0-9]+동$/, "동");
 const exDefaults = () => ({
   report: [`${DATA.areas.join("·")} 상권 영역 현황`, `${DATA.source} · ${DATA.ref} 기준`],
-  poster: [`${DATA.areas[0].replace(/[0-9]+동$/, "동")} 맛지도`, "골목마다 다른 맛, 코스로 즐겨보세요"]
+  poster: [`${PLACE} 맛지도`, "골목마다 다른 맛, 코스로 즐겨보세요"],
+  illust: [`${PLACE} 골목 지도`, "구역마다 다른 매력을 찾아보세요"],
+  line: [`${PLACE} 골목 코스`, "정거장처럼 하나씩 들러보세요"],
+  cards: [`${PLACE} 골목 한눈에`, "구역별 가게 수와 주요 업종"]
 })[exType];
 
 function projector(W0, H0, x0, y0, w, h, pad) {
@@ -484,13 +494,149 @@ function drawPoster(cv, title, sub) {
   ctx.textAlign = "start";
 }
 
+const PASTEL = ["#F7B267","#7FC8A9","#8EA7E9","#F497B6","#C9B6E4","#F2D16B"];
+const DEEP = ["#C46A12","#2E8B6A","#3F5BB5","#C2457A","#7B5EA7","#A8860F"];
+const ICON = {"음식":"🍜","소매":"🛍️","교육":"📚","예술·스포츠":"🎨","수리·개인":"✂️","보건의료":"💊",
+              "과학·기술":"🔬","부동산":"🏠","시설관리·임대":"🔧","숙박":"🛏️"};
+const EMOJI = s => `${s}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+const shownCats = z => topCats(z, 12).filter(([c]) => exCats.has(c));
+const unitWord = () => exCats.size === 1 && exCats.has("음식") ? "음식점" : "점포";
+function smoothPath(ctx, xy, iter) {
+  const sm = chaikin(xy, iter); ctx.beginPath();
+  sm.forEach(([a, b], i) => i ? ctx.lineTo(a, b) : ctx.moveTo(a, b)); ctx.closePath();
+}
+function titleBlock(ctx, W, title, sub, color, subColor, y, size) {
+  ctx.textAlign = "center"; ctx.fillStyle = color; ctx.font = `800 ${size}px ${FONT}`; ctx.fillText(title, W / 2, y);
+  if (sub) { ctx.fillStyle = subColor; ctx.font = `500 ${Math.round(size * .38)}px ${FONT}`; ctx.fillText(sub, W / 2, y + size * .72); }
+  ctx.textAlign = "start";
+}
+function footer(ctx, W, H, color) {
+  ctx.fillStyle = color; ctx.font = `400 17px ${FONT}`; ctx.textAlign = "center";
+  ctx.fillText(`자료: ${DATA.source} (${DATA.ref} 기준) · 숫자는 선택 업종(${[...exCats].join("·")}) 기준`, W / 2, H - 40);
+  ctx.textAlign = "start";
+}
+
+// ① 일러스트 지도: 점 대신 말랑한 구역 덩어리 + 업종 아이콘
+function drawIllust(cv, title, sub) {
+  const W = 1200, H = 1500; cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#EAF3F6"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#D5E6EC"; for (let x = 30; x < W; x += 40) for (let y = 30; y < H; y += 40) { ctx.beginPath(); ctx.arc(x, y, 1.6, 0, 7); ctx.fill(); }
+  titleBlock(ctx, W, title, sub, "#22313F", "#4F6D7A", 150, 80);
+  const P = projector(W, H, 90, 280, W - 180, 1020, 0.16);
+  zones.forEach((z, i) => {
+    const xy = z.polygon.map(([x, y]) => P(x, y));
+    ctx.save(); ctx.translate(10, 14); smoothPath(ctx, xy, 4); ctx.fillStyle = "rgba(34,49,63,.10)"; ctx.fill(); ctx.restore();
+    smoothPath(ctx, xy, 4); ctx.fillStyle = PASTEL[i % 6]; ctx.fill();
+    ctx.lineWidth = 8; ctx.strokeStyle = "#FFFFFF"; ctx.stroke();
+  });
+  zones.forEach((z, i) => {
+    const [cx, cy] = centroid(P, z.polygon);
+    const icons = shownCats(z).slice(0, 3).map(([c]) => ICON[c] || "📍");
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = EMOJI(46); ctx.fillText(icons.join(" "), cx, cy - 62);
+    ctx.font = `800 34px ${FONT}`; const tw = ctx.measureText(z.name).width + 48;
+    ctx.fillStyle = "#FFFFFF"; rrect(ctx, cx - tw / 2, cy - 28, tw, 56, 28); ctx.fill();
+    ctx.fillStyle = DEEP[i % 6]; ctx.fillText(z.name, cx, cy + 1);
+    ctx.fillStyle = "#22313F"; ctx.font = `700 26px ${FONT}`;
+    ctx.fillText(`${unitWord()} ${countIn(z).toLocaleString()}곳`, cx, cy + 56);
+    ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
+  });
+  footer(ctx, W, H, "#6B8794");
+}
+
+// ② 코스 노선도: 지하철 노선도처럼 구역을 정거장으로
+function drawLine(cv, title, sub) {
+  const W = 1600, H = 900; cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#22313F"; ctx.font = `800 56px ${FONT}`; ctx.fillText(title, 90, 130);
+  if (sub) { ctx.fillStyle = "#6B7B86"; ctx.font = `500 24px ${FONT}`; ctx.fillText(sub, 90, 176); }
+  const P = projector(W, H, 0, 0, W, H, 0);
+  const order = zones.map((z, i) => ({z, i, x: centroid(P, z.polygon)[0]})).sort((a, b) => a.x - b.x);
+  const n = order.length, y = 470, x0 = 190, x1 = W - 190;
+  const xs = order.map((_, k) => n === 1 ? W / 2 : x0 + (x1 - x0) * k / (n - 1));
+  ctx.lineCap = "round";
+  for (let k = 0; k < n - 1; k++) {
+    ctx.strokeStyle = DEEP[order[k].i % 6]; ctx.lineWidth = 18;
+    ctx.beginPath(); ctx.moveTo(xs[k], y); ctx.lineTo((xs[k] + xs[k + 1]) / 2, y); ctx.stroke();
+    ctx.strokeStyle = DEEP[order[k + 1].i % 6];
+    ctx.beginPath(); ctx.moveTo((xs[k] + xs[k + 1]) / 2, y); ctx.lineTo(xs[k + 1], y); ctx.stroke();
+  }
+  order.forEach(({z, i}, k) => {
+    const x = xs[k], c = DEEP[i % 6];
+    ctx.fillStyle = "#FFFFFF"; ctx.strokeStyle = c; ctx.lineWidth = 12;
+    ctx.beginPath(); ctx.arc(x, y, 38, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = c; ctx.font = `800 26px ${FONT}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(String(k + 1), x, y + 1); ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "#22313F"; ctx.font = `800 ${n > 4 ? 28 : 36}px ${FONT}`; ctx.fillText(z.name, x, y - 74);
+    ctx.fillStyle = c; ctx.font = `800 ${n > 4 ? 44 : 58}px ${FONT}`; ctx.fillText(countIn(z).toLocaleString(), x, y + 120);
+    ctx.fillStyle = "#6B7B86"; ctx.font = `500 22px ${FONT}`; ctx.fillText(`곳의 ${unitWord()}`, x, y + 156);
+    ctx.fillStyle = "#9AA6AE"; ctx.font = `500 17px ${FONT}`; ctx.fillText("주요 업종", x, y + 198);
+    ctx.fillStyle = "#4F5D66"; ctx.font = `400 20px ${FONT}`;
+    topCats(z, 3).forEach(([cat, m], j) => ctx.fillText(`${ICON[cat] || "·"} ${cat} ${m}`, x, y + 228 + j * 30));
+    ctx.textAlign = "start";
+  });
+  footer(ctx, W, H, "#9AA6AE");
+}
+
+// ③ 카드뉴스: 구역 실루엣 + 업종 막대 (인스타 4:5)
+function silhouette(ctx, poly, bx, by, bw, bh, color) {
+  const lat0 = poly.reduce((t, p) => t + p[1], 0) / poly.length, k = Math.cos(lat0 * Math.PI / 180);
+  const xs = poly.map(p => p[0] * k), ys = poly.map(p => p[1]);
+  const [a, b, c, d] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const sc = Math.min(bw / (b - a || 1e-6), bh / (d - c || 1e-6)) * .9;
+  const ox = bx + (bw - (b - a) * sc) / 2, oy = by + (bh - (d - c) * sc) / 2;
+  smoothPath(ctx, poly.map(([x, y]) => [ox + (x * k - a) * sc, oy + (d - y) * sc]), 3);
+  ctx.fillStyle = color; ctx.fill();
+}
+function drawCards(cv, title, sub) {
+  const W = 1080, H = 1350; cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#F4F1FA"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#22313F"; ctx.font = `800 64px ${FONT}`; ctx.fillText(title, 70, 140);
+  if (sub) { ctx.fillStyle = "#6B6880"; ctx.font = `500 26px ${FONT}`; ctx.fillText(sub, 70, 188); }
+  const n = zones.length, gap = 22, avail = H - 240 - 110, rh = Math.min(250, (avail - gap * (n - 1)) / n);
+  const top = 240 + (avail - (rh * n + gap * (n - 1))) / 2;
+  const maxv = Math.max(1, ...zones.flatMap(z => topCats(z, 3).map(([, m]) => m)));
+  zones.forEach((z, i) => {
+    const y = top + i * (rh + gap), c = DEEP[i % 6];
+    ctx.fillStyle = "#FFFFFF"; rrect(ctx, 50, y, W - 100, rh, 26); ctx.fill();
+    ctx.fillStyle = PASTEL[i % 6]; rrect(ctx, 74, y + 22, rh - 44, rh - 44, 20); ctx.fill();
+    silhouette(ctx, z.polygon, 84, y + 32, rh - 64, rh - 64, "#FFFFFF");
+    const tx = 74 + rh - 44 + 34;
+    ctx.fillStyle = c; ctx.font = `800 ${Math.min(36, rh * .16)}px ${FONT}`; ctx.fillText(z.name, tx, y + rh * .3);
+    ctx.fillStyle = "#22313F"; ctx.font = `800 ${Math.min(54, rh * .24)}px ${FONT}`;
+    const num = countIn(z).toLocaleString(); ctx.fillText(num, tx, y + rh * .62);
+    const nw = ctx.measureText(num).width;
+    ctx.fillStyle = "#6B6880"; ctx.font = `500 ${Math.min(22, rh * .1)}px ${FONT}`; ctx.fillText(`곳의 ${unitWord()}`, tx + nw + 10, y + rh * .62);
+    const bx = 660, bwMax = W - 100 - bx;
+    ctx.fillStyle = "#8D89A3"; ctx.font = `500 ${Math.min(17, rh * .075)}px ${FONT}`; ctx.fillText("주요 업종", bx, y + rh * .13);
+    topCats(z, 3).forEach(([cat, m], j) => {
+      const by = y + rh * (.3 + j * .23);
+      ctx.fillStyle = "#3D3A50"; ctx.font = `500 ${Math.min(20, rh * .09)}px ${FONT}`; ctx.fillText(`${ICON[cat] || ""} ${cat}`, bx, by);
+      ctx.fillStyle = "#ECE8F4"; rrect(ctx, bx, by + 8, bwMax - 60, 12, 6); ctx.fill();
+      ctx.fillStyle = PASTEL[i % 6]; rrect(ctx, bx, by + 8, Math.max(12, (bwMax - 60) * m / maxv), 12, 6); ctx.fill();
+      ctx.fillStyle = "#3D3A50"; ctx.textAlign = "right"; ctx.fillText(String(m), W - 74, by + 20); ctx.textAlign = "start";
+    });
+  });
+  footer(ctx, W, H, "#8D89A3");
+}
+
 async function renderExport() {
   await document.fonts.ready;
   const t = $("exTitle").value.trim() || exDefaults()[0], s2 = $("exSub").value.trim();
-  (exType === "report" ? drawReport : drawPoster)($("exCanvas"), t, s2);
-  $("exHint").textContent = exType === "report"
-    ? "보고서·제안서에 넣는 가로형(1600×1000) 이미지입니다."
-    : "현수막·SNS·QR 안내용 세로형(1200×1650) 이미지입니다. 카드 숫자는 선택한 업종 기준(음식은 카페 포함)입니다.";
+  ({report: drawReport, poster: drawPoster, illust: drawIllust, line: drawLine, cards: drawCards})[exType]($("exCanvas"), t, s2);
+  $("exHint").textContent = {
+    report: "보고서·제안서용 가로형(1600×1000). 점포 위치를 그대로 보여줍니다.",
+    illust: "현수막·안내판용 세로형(1200×1500). 구역을 일러스트처럼 단순화하고 대표 업종을 아이콘으로 표시합니다.",
+    line: "가로형(1600×900). 구역을 서쪽부터 동쪽 순서의 정거장으로 이은 코스 안내도입니다.",
+    cards: "인스타그램 카드뉴스 비율(1080×1350). 구역 모양과 업종 막대그래프를 함께 보여줍니다.",
+    poster: "세로형(1200×1650) 밤하늘 톤 포스터. 점포 위치를 빛나는 점으로 표시합니다."
+  }[exType] + " 숫자는 선택한 업종 기준이며, 음식에는 카페가 포함됩니다.";
+  const hideDots = exType === "illust" || exType === "line" || exType === "cards";
+  ["exCluster", "exOutside"].forEach(id => $(id).closest("label").style.display = hideDots ? "none" : "");
+  $("exSmooth").closest("label").style.display = exType === "report" || exType === "poster" ? "" : "none";
 }
 function buildChips() {
   const cats = [...new Set(DATA.stores.map(s => s[3]))].sort();
@@ -508,7 +654,7 @@ function buildChips() {
 function setExType(t) {
   exType = t;
   const all = [...new Set(DATA.stores.map(s => s[3]))];
-  exCats = new Set(t === "poster" && all.includes("음식") ? ["음식"] : all);
+  exCats = new Set(t !== "report" && all.includes("음식") ? ["음식"] : all);
   buildChips();
   document.querySelectorAll("#exType button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.t === t)));
   [$("exTitle").value, $("exSub").value] = exDefaults();
