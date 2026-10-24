@@ -113,6 +113,14 @@ footer{padding:14px 20px;border-top:1px solid var(--line);display:grid;gap:8px}
           <button data-t="poster" aria-pressed="false">밤하늘 맛지도</button>
         </div>
       </label>
+      <label id="exBgWrap">배경 지도
+        <div class="seg" id="exBg">
+          <button data-b="none" aria-pressed="true">없음</button>
+          <button data-b="light" aria-pressed="false">밝게</button>
+          <button data-b="pastel" aria-pressed="false">파스텔</button>
+          <button data-b="dark" aria-pressed="false">어둡게</button>
+        </div>
+      </label>
       <label>표시할 업종
         <div class="chips" id="exCats"></div>
       </label>
@@ -135,7 +143,7 @@ const COLORS = ["#3D4FA8","#C98A10","#2F7F86","#9C3D6B","#5E7D1F","#7A5230"];
 const $ = id => document.getElementById(id);
 const EMPTY = '<div class="empty">아직 지정한 상권이 없습니다.<br>점포 점이 모인 골목을 따라 경계를 그려보세요.</div>';
 
-const APP_VERSION = "v1025-3";  // 화면에 표시해 반영 여부 확인용
+const APP_VERSION = "v1025-4";  // 화면에 표시해 반영 여부 확인용
 $("meta").textContent = `${DATA.source} · ${DATA.ref} 기준 · 점포 ${DATA.stores.length.toLocaleString()}개 (${DATA.areas.join(", ")}) · 앱 ${APP_VERSION}`;
 $("zones").innerHTML = EMPTY;
 
@@ -338,21 +346,67 @@ const exDefaults = () => ({
   cards: [`${PLACE} 골목 한눈에`, "구역별 가게 수와 주요 업종"]
 })[exType];
 
+// 웹 메르카토르(지도 타일과 같은 좌표계) 투영: 경위도 → 캔버스 좌표
+const mercX = lon => (lon + 180) / 360;
+const mercY = lat => { const r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2; };
+const invX = x => x * 360 - 180;
+const invY = y => Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI;
 function projector(W0, H0, x0, y0, w, h, pad) {
-  const ps = zones.flatMap(z => z.polygon);
+  const ps = zones.flatMap(z => z.polygon).map(([lon, lat]) => [mercX(lon), mercY(lat)]);
   let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
   ps.forEach(([x, y]) => { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); });
-  const k = Math.cos((minY + maxY) / 2 * Math.PI / 180);           // 경도 보정
-  let gw = (maxX - minX) * k, gh = maxY - minY;
-  const mx = gw * pad + 1e-5, my = gh * pad + 1e-5;
-  minX -= mx / k; maxX += mx / k; minY -= my; maxY += my; gw = (maxX - minX) * k; gh = maxY - minY;
-  const sc = Math.min(w / gw, h / gh);
-  const ox = x0 + (w - gw * sc) / 2, oy = y0 + (h - gh * sc) / 2;
-  const f = (lon, lat) => [ox + (lon - minX) * k * sc, oy + (maxY - lat) * sc];
-  f.box = [minX, minY, maxX, maxY];
+  const mx = (maxX - minX) * pad + 1e-9, my = (maxY - minY) * pad + 1e-9;
+  minX -= mx; maxX += mx; minY -= my; maxY += my;
+  const sc = Math.min(w / (maxX - minX), h / (maxY - minY));
+  const ox = x0 + (w - (maxX - minX) * sc) / 2, oy = y0 + (h - (maxY - minY) * sc) / 2;
+  const f = (lon, lat) => [ox + (mercX(lon) - minX) * sc, oy + (mercY(lat) - minY) * sc];
+  f.box = [invX(minX), invY(maxY), invX(maxX), invY(minY)];   // [서, 남, 동, 북]
+  f.sc = sc; f.ox = ox; f.oy = oy; f.minX = minX; f.minY = minY;
   return f;
 }
+
+// ───── 실제 지도 배경(오픈스트리트맵 타일)을 캔버스에 깔고 색 보정 ─────
+const tileCache = new Map();
+function loadTile(z, x, y) {
+  const url = `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+  if (!tileCache.has(url)) tileCache.set(url, new Promise(ok => {
+    const im = new Image(); im.crossOrigin = "anonymous";
+    im.onload = () => ok(im); im.onerror = () => ok(null); im.src = url;
+  }));
+  return tileCache.get(url);
+}
+const BG_STYLE = {
+  light:  {filter: "grayscale(1) brightness(1.12) contrast(.82)", tint: "rgba(255,255,255,.30)"},
+  dark:   {filter: "grayscale(1) invert(1) brightness(.62) contrast(1.15)", tint: "rgba(22,35,63,.45)"},
+  pastel: {filter: "grayscale(1) brightness(1.15) contrast(.75)", tint: "rgba(205,228,236,.45)"}
+};
+let bgFailed = false;
+async function drawBasemap(ctx, P, rx, ry, rw, rh, mode) {
+  if (!mode || mode === "none") return;
+  const z = Math.max(0, Math.min(19, Math.round(Math.log2(P.sc / 256))));
+  const n = 2 ** z, tpx = P.sc / n;                         // 캔버스에서 타일 한 장의 크기
+  const wx0 = P.minX + (rx - P.ox) / P.sc, wx1 = P.minX + (rx + rw - P.ox) / P.sc;
+  const wy0 = P.minY + (ry - P.oy) / P.sc, wy1 = P.minY + (ry + rh - P.oy) / P.sc;
+  const jobs = [];
+  for (let tx = Math.floor(wx0 * n); tx <= Math.floor(wx1 * n); tx++)
+    for (let ty = Math.floor(wy0 * n); ty <= Math.floor(wy1 * n); ty++)
+      jobs.push(loadTile(z, tx, ty).then(im => ({im, tx, ty})));
+  const tiles = await Promise.all(jobs);
+  if (tiles.some(t => !t.im)) bgFailed = true;
+  const st = BG_STYLE[mode];
+  ctx.save(); ctx.beginPath(); ctx.rect(rx, ry, rw, rh); ctx.clip();
+  ctx.filter = st.filter;
+  tiles.forEach(({im, tx, ty}) => { if (im) ctx.drawImage(im, P.ox + (tx / n - P.minX) * P.sc, P.oy + (ty / n - P.minY) * P.sc, tpx + .5, tpx + .5); });
+  ctx.filter = "none";
+  ctx.fillStyle = st.tint; ctx.fillRect(rx, ry, rw, rh);
+  ctx.restore();
+}
+function osmCredit(ctx, x, y, color) { ctx.fillStyle = color; ctx.font = `400 14px ${FONT}`; ctx.fillText("배경지도 © OpenStreetMap contributors", x, y); }
+
 let exCats = null;   // 표시 업종(Set), 용도 바꿀 때 기본값 지정
+let exBgMode = "none";
+const exBg = () => (exType === "line" || exType === "cards") ? "none" : exBgMode;
+function setBg(b) { exBgMode = b; document.querySelectorAll("#exBg button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.b === b))); }
 function chaikin(pts, n) {
   for (let k = 0; k < n; k++) {
     const out = [];
@@ -396,7 +450,7 @@ function storesIn(P) {
   return pts.filter(p => { const [x, y] = p._s; return x >= a && x <= c && y >= b && y <= d; });
 }
 
-function drawReport(cv, title, sub) {
+async function drawReport(cv, title, sub) {
   const W = 1600, H = 1000; cv.width = W; cv.height = H;
   const ctx = cv.getContext("2d");
   ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, W, H);
@@ -406,7 +460,8 @@ function drawReport(cv, title, sub) {
   ctx.fillStyle = "#F3F5F4"; rrect(ctx, mx, my, mw, mh, 10); ctx.fill();
   ctx.save(); rrect(ctx, mx, my, mw, mh, 10); ctx.clip();
   const P = projector(W, H, mx + 24, my + 24, mw - 48, mh - 48, 0.18);
-  zones.forEach(z => { pathPoly(ctx, P, z.polygon); ctx.fillStyle = z.color + "1F"; ctx.fill(); });
+  await drawBasemap(ctx, P, mx, my, mw, mh, exBg());
+  zones.forEach(z => { pathPoly(ctx, P, z.polygon); ctx.fillStyle = z.color + (exBg() === "none" ? "1F" : "33"); ctx.fill(); });
   visibleDots(P).forEach(g => {
     const [x, y] = P(g.lon, g.lat), r = Math.min(4 + Math.sqrt(g.n - 1) * 3.2, 18);
     ctx.fillStyle = g.zone ? g.zone.color : "#B7BFBB"; ctx.globalAlpha = g.zone ? .85 : .6;
@@ -436,13 +491,14 @@ function drawReport(cv, title, sub) {
     topCats(z, 9).filter(([c]) => exCats.has(c)).slice(0, 3).forEach(([c, n]) => { ctx.fillText(c, lx + 28, y); ctx.textAlign = "right"; ctx.fillText(String(n), W - 64, y); ctx.textAlign = "start"; y += 25; });
     y += 18; ctx.strokeStyle = "#E1E6E3"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(lx, y - 14); ctx.lineTo(W - 64, y - 14); ctx.stroke(); y += 14;
   });
+  if (exBg() !== "none") osmCredit(ctx, mx + 16, my + mh - 16, "#5B6662");
   ctx.fillStyle = "#8A9490"; ctx.font = `400 15px ${FONT}`;
   const allCats = new Set(DATA.stores.map(s => s[3]));
   const catNote = exCats.size === allCats.size ? "전체 업종" : [...exCats].join("·");
   ctx.fillText(`표시 업종: ${catNote} · ${$("exCluster").checked ? "원 크기와 숫자 = 같은 건물 점포 수" : "점 하나 = 점포 1곳"} · 점포 위치 좌표 기준 집계`, 64, H - 40);
 }
 
-function drawPoster(cv, title, sub) {
+async function drawPoster(cv, title, sub) {
   const W = 1200, H = 1650; cv.width = W; cv.height = H;
   const ctx = cv.getContext("2d");
   ctx.fillStyle = "#16233F"; ctx.fillRect(0, 0, W, H);
@@ -461,6 +517,7 @@ function drawPoster(cv, title, sub) {
   ctx.fillStyle = "#1E2E52"; rrect(ctx, mx, my, mw, mh, 28); ctx.fill();
   ctx.save(); rrect(ctx, mx, my, mw, mh, 28); ctx.clip();
   const P = projector(W, H, mx + 40, my + 40, mw - 80, mh - 80, 0.12);
+  await drawBasemap(ctx, P, mx, my, mw, mh, exBg());
   zones.forEach((z, i) => { pathPoly(ctx, P, z.polygon); ctx.fillStyle = POSTER_COLORS[i % 6] + "33"; ctx.fill(); });
   visibleDots(P).forEach(g => {
     const [x, y] = P(g.lon, g.lat);
@@ -491,7 +548,7 @@ function drawPoster(cv, title, sub) {
     ctx.textAlign = "start";
   });
   ctx.fillStyle = "#8C9BBE"; ctx.font = `400 18px ${FONT}`; ctx.textAlign = "center";
-  ctx.fillText(`표시: ${[...exCats].join("·")} · 자료: ${DATA.source} (${DATA.ref} 기준)`, W / 2, H - 50);
+  ctx.fillText(`표시: ${[...exCats].join("·")} · 자료: ${DATA.source} (${DATA.ref} 기준)${exBg() !== "none" ? " · 배경지도 © OpenStreetMap contributors" : ""}`, W / 2, H - 50);
   ctx.textAlign = "start";
 }
 
@@ -514,21 +571,27 @@ function titleBlock(ctx, W, title, sub, color, subColor, y, size) {
 function footer(ctx, W, H, color) {
   ctx.fillStyle = color; ctx.font = `400 17px ${FONT}`; ctx.textAlign = "center";
   ctx.fillText(`자료: ${DATA.source} (${DATA.ref} 기준) · 숫자는 선택 업종(${[...exCats].join("·")}) 기준`, W / 2, H - 40);
+  if (exBg() !== "none" && (exType === "illust")) { ctx.font = `400 14px ${FONT}`; ctx.fillText("배경지도 © OpenStreetMap contributors", W / 2, H - 16); }
   ctx.textAlign = "start";
 }
 
 // ① 일러스트 지도: 점 대신 말랑한 구역 덩어리 + 업종 아이콘
-function drawIllust(cv, title, sub) {
+async function drawIllust(cv, title, sub) {
   const W = 1200, H = 1500; cv.width = W; cv.height = H;
   const ctx = cv.getContext("2d");
   ctx.fillStyle = "#EAF3F6"; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = "#D5E6EC"; for (let x = 30; x < W; x += 40) for (let y = 30; y < H; y += 40) { ctx.beginPath(); ctx.arc(x, y, 1.6, 0, 7); ctx.fill(); }
   titleBlock(ctx, W, title, sub, "#22313F", "#4F6D7A", 150, 80);
   const P = projector(W, H, 90, 280, W - 180, 1020, 0.16);
+  if (exBg() !== "none") {
+    ctx.save(); rrect(ctx, 60, 250, W - 120, 1080, 32); ctx.clip();
+    await drawBasemap(ctx, P, 60, 250, W - 120, 1080, exBg()); ctx.restore();
+    ctx.lineWidth = 6; ctx.strokeStyle = "#FFFFFF"; rrect(ctx, 60, 250, W - 120, 1080, 32); ctx.stroke();
+  }
   zones.forEach((z, i) => {
     const xy = z.polygon.map(([x, y]) => P(x, y));
     ctx.save(); ctx.translate(10, 14); smoothPath(ctx, xy, 4); ctx.fillStyle = "rgba(34,49,63,.10)"; ctx.fill(); ctx.restore();
-    smoothPath(ctx, xy, 4); ctx.fillStyle = PASTEL[i % 6]; ctx.fill();
+    smoothPath(ctx, xy, 4); ctx.fillStyle = PASTEL[i % 6]; ctx.globalAlpha = exBg() === "none" ? 1 : .82; ctx.fill(); ctx.globalAlpha = 1;
     ctx.lineWidth = 8; ctx.strokeStyle = "#FFFFFF"; ctx.stroke();
   });
   zones.forEach((z, i) => {
@@ -624,17 +687,25 @@ function drawCards(cv, title, sub) {
   footer(ctx, W, H, "#8D89A3");
 }
 
+let renderSeq = 0;
 async function renderExport() {
+  const seq = ++renderSeq;
   await document.fonts.ready;
   const t = $("exTitle").value.trim() || exDefaults()[0], s2 = $("exSub").value.trim();
-  ({report: drawReport, poster: drawPoster, illust: drawIllust, line: drawLine, cards: drawCards})[exType]($("exCanvas"), t, s2);
+  const off = document.createElement("canvas"); bgFailed = false;
+  if (exBg() !== "none") $("exHint").textContent = "배경 지도를 불러오는 중입니다…";
+  await ({report: drawReport, poster: drawPoster, illust: drawIllust, line: drawLine, cards: drawCards})[exType](off, t, s2);
+  if (seq !== renderSeq) return;                      // 더 최근 요청이 있으면 버림
+  const cv = $("exCanvas"); cv.width = off.width; cv.height = off.height; cv.getContext("2d").drawImage(off, 0, 0);
   $("exHint").textContent = {
     report: "보고서·제안서용 가로형(1600×1000). 점포 위치를 그대로 보여줍니다.",
     illust: "현수막·안내판용 세로형(1200×1500). 구역을 일러스트처럼 단순화하고 대표 업종을 아이콘으로 표시합니다.",
     line: "가로형(1600×900). 구역을 서쪽부터 동쪽 순서의 정거장으로 이은 코스 안내도입니다.",
     cards: "인스타그램 카드뉴스 비율(1080×1350). 구역 모양과 업종 막대그래프를 함께 보여줍니다.",
     poster: "세로형(1200×1650) 밤하늘 톤 포스터. 점포 위치를 빛나는 점으로 표시합니다."
-  }[exType] + " 숫자는 선택한 업종 기준이며, 음식에는 카페가 포함됩니다.";
+  }[exType] + " 숫자는 선택한 업종 기준이며, 음식에는 카페가 포함됩니다."
+    + (bgFailed ? " 일부 배경 지도를 불러오지 못했습니다(인터넷 연결 확인)." : "");
+  $("exBgWrap").style.display = (exType === "line" || exType === "cards") ? "none" : "";
   const hideDots = exType === "illust" || exType === "line" || exType === "cards";
   ["exCluster", "exOutside"].forEach(id => $(id).closest("label").style.display = hideDots ? "none" : "");
   $("exSmooth").closest("label").style.display = exType === "report" || exType === "poster" ? "" : "none";
@@ -656,6 +727,7 @@ function setExType(t) {
   exType = t;
   const all = [...new Set(DATA.stores.map(s => s[3]))];
   exCats = new Set(t !== "report" && all.includes("음식") ? ["음식"] : all);
+  setBg({report: "light", illust: "pastel", poster: "dark"}[t] || "none");
   buildChips();
   document.querySelectorAll("#exType button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.t === t)));
   [$("exTitle").value, $("exSub").value] = exDefaults();
@@ -668,7 +740,14 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") $("exClose")
 document.querySelectorAll("#exType button").forEach(b => b.onclick = () => setExType(b.dataset.t));
 ["exTitle", "exSub"].forEach(id => $(id).addEventListener("input", renderExport));
 ["exCluster", "exSmooth", "exOutside"].forEach(id => $(id).addEventListener("change", renderExport));
-$("exSave").onclick = () => $("exCanvas").toBlob(async blob => {
+document.querySelectorAll("#exBg button").forEach(b => b.onclick = () => { setBg(b.dataset.b); renderExport(); });
+$("exSave").onclick = () => {
+  try { $("exCanvas").toDataURL(); } catch (e) {
+    $("exHint").textContent = "배경 지도 때문에 이미지를 저장할 수 없습니다. 배경 지도를 '없음'으로 바꾼 뒤 저장하세요."; return;
+  }
+  saveCanvas();
+};
+const saveCanvas = () => $("exCanvas").toBlob(async blob => {
   const name = `${($("exTitle").value.trim() || "상권지도").replace(/[\\/:*?"<>|]/g, "")}_${exType === "report" ? "보고서용" : "홍보용"}.png`;
   if (HOSTED && dl) { try { await dl.save({filename: name, data: blob}); } catch (e) {} return; }
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click();
