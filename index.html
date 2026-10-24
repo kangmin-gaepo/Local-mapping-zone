@@ -86,17 +86,20 @@ $("zones").innerHTML = EMPTY;
 
 const map = L.map("map", {preferCanvas: true, doubleClickZoom: false});
 if (!HOSTED) {
-  // 파일로 열면(file://) OSM 공식 서버는 정책상 차단(403) → CARTO 타일 사용
-  const attr = "&copy; OpenStreetMap contributors &copy; CARTO";
+  // 기본: OSM 공식 타일(https 웹 주소에서 정상, 파일로 직접 열면 정책상 403)
+  // CARTO는 2026-08부터 키 없으면 워터마크 → CARTO_KEY가 있을 때만 메뉴에 추가
+  const CARTO_KEY = "";
   const BASEMAPS = {
-    "CARTO 기본": L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {maxZoom: 20, subdomains: "abcd", attribution: attr}),
-    "CARTO 밝게": L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {maxZoom: 20, subdomains: "abcd", attribution: attr}),
-    "배경지도 끄기": L.layerGroup()
+    "오픈스트리트맵": L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {maxZoom: 20, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"}),
   };
-  BASEMAPS["CARTO 기본"].addTo(map);
+  if (CARTO_KEY) BASEMAPS["CARTO"] = L.tileLayer(`https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${CARTO_KEY}`,
+      {maxZoom: 20, subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO"});
+  BASEMAPS["배경지도 끄기"] = L.layerGroup();
+  BASEMAPS["오픈스트리트맵"].addTo(map);
   L.control.layers(BASEMAPS, null, {position: "topleft", collapsed: false}).addTo(map);
   Object.values(BASEMAPS).forEach(l => l.on && l.on("tileerror", () =>
-    setHint("배경지도를 불러오지 못했습니다. 왼쪽 위에서 다른 지도를 고르거나 끄고 진행하세요.", true)));
+    setHint("배경지도를 불러오지 못했습니다. 왼쪽 위에서 배경지도를 끄고 진행해도 됩니다.", true)));
 }
 
 const pts = DATA.stores.map(s => {
