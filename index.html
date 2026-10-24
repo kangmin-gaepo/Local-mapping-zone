@@ -135,7 +135,8 @@ const COLORS = ["#3D4FA8","#C98A10","#2F7F86","#9C3D6B","#5E7D1F","#7A5230"];
 const $ = id => document.getElementById(id);
 const EMPTY = '<div class="empty">아직 지정한 상권이 없습니다.<br>점포 점이 모인 골목을 따라 경계를 그려보세요.</div>';
 
-$("meta").textContent = `${DATA.source} · ${DATA.ref} 기준 · 점포 ${DATA.stores.length.toLocaleString()}개 (${DATA.areas.join(", ")})`;
+const APP_VERSION = "v1025-3";  // 화면에 표시해 반영 여부 확인용
+$("meta").textContent = `${DATA.source} · ${DATA.ref} 기준 · 점포 ${DATA.stores.length.toLocaleString()}개 (${DATA.areas.join(", ")}) · 앱 ${APP_VERSION}`;
 $("zones").innerHTML = EMPTY;
 
 const map = L.map("map", {preferCanvas: true, doubleClickZoom: false});
