@@ -6,7 +6,7 @@
 <title>상권 영역 지정 · 관저1동 · 관저2동</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -54,6 +54,10 @@ footer{padding:14px 20px;border-top:1px solid var(--line);display:grid;gap:8px}
 .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{flex:1;border:0;border-radius:0}
 .seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips button{font-size:12px;padding:4px 9px;border-radius:999px}
+.chips button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.ex-ctrl label.chk{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px}
 @media (max-width:760px){.ex-box{grid-template-columns:1fr}}
 @media (max-width:760px){.app{grid-template-columns:1fr;grid-template-rows:55vh 1fr;height:auto;min-height:100%}#map{height:55vh}aside{border-left:0;border-top:1px solid var(--line)}}
 </style>
@@ -103,6 +107,12 @@ footer{padding:14px 20px;border-top:1px solid var(--line);display:grid;gap:8px}
           <button data-t="poster" aria-pressed="false">홍보 맛지도</button>
         </div>
       </label>
+      <label>표시할 업종
+        <div class="chips" id="exCats"></div>
+      </label>
+      <label class="chk"><input type="checkbox" id="exCluster" checked> 같은 건물 점포를 하나로 묶기</label>
+      <label class="chk"><input type="checkbox" id="exSmooth" checked> 경계 모서리 둥글게</label>
+      <label class="chk"><input type="checkbox" id="exOutside"> 영역 밖 점포도 표시</label>
       <label>제목 <input type="text" id="exTitle"></label>
       <label>부제 <input type="text" id="exSub"></label>
       <div class="hint" id="exHint"></div>
@@ -262,23 +272,50 @@ function payload() {
       store_ids: [], adm_codes: [...z.adm].sort(), store_count_at_ref: z.ids.length}))};
 }
 
-if (HOSTED || typeof XLSX === "undefined") $("xlsxBtn").style.display = "none";
-$("xlsxBtn").onclick = () => {
+if (HOSTED) $("xlsxBtn").style.display = "none";
+const XLSX_SRC = ["https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+                  "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"];
+function loadScript(src) {
+  return new Promise((ok, fail) => { const t = document.createElement("script"); t.src = src; t.onload = ok; t.onerror = fail; document.head.appendChild(t); });
+}
+async function ensureXLSX() {
+  for (const src of XLSX_SRC) { if (window.XLSX) break; try { await loadScript(src); } catch (e) {} }
+  return !!window.XLSX;
+}
+function reportTables() {
   const cats = [...new Set(DATA.stores.map(s => s[3]))].sort();
   const summary = [["상권", "점포수", ...cats]];
   zones.forEach(z => summary.push([z.name, z.ids.length, ...cats.map(c => z.cats[c] || 0)]));
-  summary.push([], [`자료: ${DATA.source} (${DATA.ref} 기준)`], ["행정동 범위: " + DATA.areas.join(", ")],
-    ["작성일: " + new Date().toLocaleDateString("ko-KR")], ["점포 위치 좌표 기준 집계이며, 경계선 위 점포는 결과가 달라질 수 있음"]);
+  const notes = [[`자료: ${DATA.source} (${DATA.ref} 기준)`], ["행정동 범위: " + DATA.areas.join(", ")],
+    ["작성일: " + new Date().toLocaleDateString("ko-KR")], ["점포 위치 좌표 기준 집계이며, 경계선 위 점포는 결과가 달라질 수 있음"]];
   const list = [["상권", "상호명", "업종 대분류", "행정동코드", "상가업소번호"]];
   const byId = new Map(DATA.stores.map(s => [s[5], s]));
   zones.forEach(z => z.ids.forEach(id => { const s = byId.get(id); list.push([z.name, s[2], s[3], s[4], s[5]]); }));
-  const wb = XLSX.utils.book_new();
-  const ws1 = XLSX.utils.aoa_to_sheet(summary); ws1["!cols"] = [{wch: 16}, {wch: 8}, ...cats.map(() => ({wch: 11}))];
-  const ws2 = XLSX.utils.aoa_to_sheet(list); ws2["!cols"] = [{wch: 16}, {wch: 28}, {wch: 14}, {wch: 12}, {wch: 24}];
-  XLSX.utils.book_append_sheet(wb, ws1, "상권별 요약");
-  XLSX.utils.book_append_sheet(wb, ws2, "점포 목록");
-  XLSX.writeFile(wb, `상권리포트_${DATA.ref.replace(/\./g, "")}.xlsx`);
-  setHint("엑셀 리포트를 내려받았습니다.");
+  return {cats, summary, notes, list};
+}
+function saveBlob(blob, name) {
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+$("xlsxBtn").onclick = async () => {
+  setHint("엑셀 리포트를 만드는 중입니다…");
+  const {cats, summary, notes, list} = reportTables();
+  const stamp = DATA.ref.replace(/\./g, "");
+  if (await ensureXLSX()) {
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.aoa_to_sheet([...summary, [], ...notes]); ws1["!cols"] = [{wch: 16}, {wch: 8}, ...cats.map(() => ({wch: 11}))];
+    const ws2 = XLSX.utils.aoa_to_sheet(list); ws2["!cols"] = [{wch: 16}, {wch: 28}, {wch: 14}, {wch: 12}, {wch: 24}];
+    XLSX.utils.book_append_sheet(wb, ws1, "상권별 요약");
+    XLSX.utils.book_append_sheet(wb, ws2, "점포 목록");
+    XLSX.writeFile(wb, `상권리포트_${stamp}.xlsx`);
+    setHint("엑셀 리포트를 내려받았습니다.");
+  } else {
+    // 엑셀 라이브러리를 못 불러온 경우: 엑셀에서 한글이 깨지지 않는 CSV(UTF-8 BOM)로 대체
+    const csv = rows => "\uFEFF" + rows.map(r => r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
+    saveBlob(new Blob([csv([...summary, [], ...notes])], {type: "text/csv"}), `상권리포트_요약_${stamp}.csv`);
+    setTimeout(() => saveBlob(new Blob([csv(list)], {type: "text/csv"}), `상권리포트_점포목록_${stamp}.csv`), 400);
+    setHint("엑셀 기능을 불러오지 못해 CSV 두 개(요약, 점포목록)로 내려받았습니다. 엑셀에서 바로 열립니다.");
+  }
 };
 
 // ───── 지도 이미지 만들기 (배경지도 없이 점포 점과 경계를 직접 그림) ─────
@@ -304,7 +341,42 @@ function projector(W0, H0, x0, y0, w, h, pad) {
   f.box = [minX, minY, maxX, maxY];
   return f;
 }
-function pathPoly(ctx, P, poly) { ctx.beginPath(); poly.forEach(([x, y], i) => { const [a, b] = P(x, y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); }); ctx.closePath(); }
+let exCats = null;   // 표시 업종(Set), 용도 바꿀 때 기본값 지정
+function chaikin(pts, n) {
+  for (let k = 0; k < n; k++) {
+    const out = [];
+    pts.forEach((p, i) => { const q = pts[(i + 1) % pts.length];
+      out.push([.75 * p[0] + .25 * q[0], .75 * p[1] + .25 * q[1]], [.25 * p[0] + .75 * q[0], .25 * p[1] + .75 * q[1]]); });
+    pts = out;
+  }
+  return pts;
+}
+function pathPoly(ctx, P, poly) {
+  const xy = poly.map(([x, y]) => P(x, y)), n = xy.length;
+  ctx.beginPath();
+  if (!$("exSmooth").checked) { xy.forEach(([a, b], i) => i ? ctx.lineTo(a, b) : ctx.moveTo(a, b)); ctx.closePath(); return; }
+  // 모서리만 둥글게(경계 안쪽 점포가 밖으로 보이지 않도록 반경 제한)
+  const mid = (p, q) => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+  ctx.moveTo(...mid(xy[n - 1], xy[0]));
+  xy.forEach((p, i) => {
+    const q = xy[(i + 1) % n], o = xy[(i - 1 + n) % n];
+    const r = Math.min(14, Math.hypot(p[0] - o[0], p[1] - o[1]) / 3, Math.hypot(q[0] - p[0], q[1] - p[1]) / 3);
+    ctx.arcTo(p[0], p[1], ...mid(p, q), r);
+  });
+  ctx.closePath();
+}
+// 표시 대상 점포 → (같은 좌표끼리 묶은) 점 목록
+function visibleDots(P) {
+  const list = storesIn(P).filter(p => exCats.has(p._s[3]) && (p._zone || $("exOutside").checked));
+  const groups = new Map();
+  list.forEach(p => {
+    const key = $("exCluster").checked ? p._s[0].toFixed(5) + "," + p._s[1].toFixed(5) : p._s[5];
+    const g = groups.get(key) || {lon: p._s[0], lat: p._s[1], n: 0, zone: p._zone};
+    g.n++; groups.set(key, g);
+  });
+  return [...groups.values()].sort((a, b) => b.n - a.n);
+}
+function countIn(z) { return z.ids.length ? Object.entries(z.cats).reduce((t, [c, n]) => t + (exCats.has(c) ? n : 0), 0) : 0; }
 function centroid(P, poly) { let a = 0, b = 0; poly.forEach(([x, y]) => { const [u, v] = P(x, y); a += u; b += v; }); return [a / poly.length, b / poly.length]; }
 function rrect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
 function topCats(z, n) { return Object.entries(z.cats).sort((a, b) => b[1] - a[1]).slice(0, n); }
@@ -324,10 +396,13 @@ function drawReport(cv, title, sub) {
   ctx.save(); rrect(ctx, mx, my, mw, mh, 10); ctx.clip();
   const P = projector(W, H, mx + 24, my + 24, mw - 48, mh - 48, 0.18);
   zones.forEach(z => { pathPoly(ctx, P, z.polygon); ctx.fillStyle = z.color + "1F"; ctx.fill(); });
-  storesIn(P).forEach(p => {
-    const [x, y] = P(p._s[0], p._s[1]);
-    ctx.fillStyle = p._zone ? p._zone.color : "#B7BFBB";
-    ctx.beginPath(); ctx.arc(x, y, p._zone ? 4.5 : 3, 0, 7); ctx.fill();
+  visibleDots(P).forEach(g => {
+    const [x, y] = P(g.lon, g.lat), r = Math.min(4 + Math.sqrt(g.n - 1) * 3.2, 18);
+    ctx.fillStyle = g.zone ? g.zone.color : "#B7BFBB"; ctx.globalAlpha = g.zone ? .85 : .6;
+    ctx.beginPath(); ctx.arc(x, y, g.zone ? r : 3, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    if (g.zone && g.n >= 10) { ctx.strokeStyle = "#FFFFFF"; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = "#FFFFFF"; ctx.font = `700 ${r > 12 ? 13 : 11}px ${FONT}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(g.n, x, y + 1); ctx.textAlign = "start"; ctx.textBaseline = "alphabetic"; }
   });
   zones.forEach(z => { pathPoly(ctx, P, z.polygon); ctx.strokeStyle = z.color; ctx.lineWidth = 3; ctx.stroke(); });
   zones.forEach(z => {
@@ -345,13 +420,15 @@ function drawReport(cv, title, sub) {
   zones.forEach(z => {
     ctx.fillStyle = z.color; rrect(ctx, lx, y - 15, 16, 16, 3); ctx.fill();
     ctx.fillStyle = "#1C2321"; ctx.font = `700 21px ${FONT}`; ctx.fillText(z.name, lx + 28, y);
-    ctx.font = `700 21px ${FONT}`; ctx.textAlign = "right"; ctx.fillText(`${z.ids.length.toLocaleString()}개`, W - 64, y); ctx.textAlign = "start";
+    ctx.font = `700 21px ${FONT}`; ctx.textAlign = "right"; ctx.fillText(`${countIn(z).toLocaleString()}개`, W - 64, y); ctx.textAlign = "start";
     y += 30; ctx.font = `400 17px ${FONT}`; ctx.fillStyle = "#5B6662";
-    topCats(z, 3).forEach(([c, n]) => { ctx.fillText(c, lx + 28, y); ctx.textAlign = "right"; ctx.fillText(String(n), W - 64, y); ctx.textAlign = "start"; y += 25; });
+    topCats(z, 9).filter(([c]) => exCats.has(c)).slice(0, 3).forEach(([c, n]) => { ctx.fillText(c, lx + 28, y); ctx.textAlign = "right"; ctx.fillText(String(n), W - 64, y); ctx.textAlign = "start"; y += 25; });
     y += 18; ctx.strokeStyle = "#E1E6E3"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(lx, y - 14); ctx.lineTo(W - 64, y - 14); ctx.stroke(); y += 14;
   });
   ctx.fillStyle = "#8A9490"; ctx.font = `400 15px ${FONT}`;
-  ctx.fillText("점 하나 = 점포 1곳 · 영역 밖 점포는 회색 · 점포 위치 좌표 기준 집계", 64, H - 40);
+  const allCats = new Set(DATA.stores.map(s => s[3]));
+  const catNote = exCats.size === allCats.size ? "전체 업종" : [...exCats].join("·");
+  ctx.fillText(`표시 업종: ${catNote} · ${$("exCluster").checked ? "원 크기와 숫자 = 같은 건물 점포 수" : "점 하나 = 점포 1곳"} · 점포 위치 좌표 기준 집계`, 64, H - 40);
 }
 
 function drawPoster(cv, title, sub) {
@@ -374,12 +451,12 @@ function drawPoster(cv, title, sub) {
   ctx.save(); rrect(ctx, mx, my, mw, mh, 28); ctx.clip();
   const P = projector(W, H, mx + 40, my + 40, mw - 80, mh - 80, 0.12);
   zones.forEach((z, i) => { pathPoly(ctx, P, z.polygon); ctx.fillStyle = POSTER_COLORS[i % 6] + "33"; ctx.fill(); });
-  storesIn(P).forEach(p => {
-    const [x, y] = P(p._s[0], p._s[1]); const food = p._s[3] === "음식";
-    if (!p._zone) { ctx.fillStyle = "rgba(255,255,255,.14)"; ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 7); ctx.fill(); return; }
-    const c = POSTER_COLORS[zones.indexOf(p._zone) % 6];
-    ctx.fillStyle = food ? c : "rgba(255,255,255,.35)";
-    ctx.beginPath(); ctx.arc(x, y, food ? 6 : 3, 0, 7); ctx.fill();
+  visibleDots(P).forEach(g => {
+    const [x, y] = P(g.lon, g.lat);
+    if (!g.zone) { ctx.fillStyle = "rgba(255,255,255,.16)"; ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 7); ctx.fill(); return; }
+    const c = POSTER_COLORS[zones.indexOf(g.zone) % 6], r = Math.min(6 + Math.sqrt(g.n - 1) * 3.5, 20);
+    ctx.fillStyle = c; ctx.globalAlpha = .18; ctx.beginPath(); ctx.arc(x, y, r * 1.9, 0, 7); ctx.fill();   // 은은한 빛
+    ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
   });
   zones.forEach((z, i) => { pathPoly(ctx, P, z.polygon); ctx.strokeStyle = POSTER_COLORS[i % 6]; ctx.lineWidth = 4; ctx.setLineDash([14, 10]); ctx.stroke(); ctx.setLineDash([]); });
   zones.forEach((z, i) => {
@@ -398,12 +475,12 @@ function drawPoster(cv, title, sub) {
     ctx.fillStyle = c; rrect(ctx, x, cy0, cw, 10, [22, 22, 0, 0]); ctx.fill();
     ctx.textAlign = "center";
     ctx.fillStyle = c; ctx.font = `800 ${n > 3 ? 28 : 36}px ${FONT}`; ctx.fillText(z.name, x + cw / 2, cy0 + 82);
-    ctx.fillStyle = "#FFF4DC"; ctx.font = `800 ${n > 3 ? 46 : 60}px ${FONT}`; ctx.fillText(`${z.cats["음식"] || 0}`, x + cw / 2, cy0 + 165);
-    ctx.fillStyle = "#C9D2E6"; ctx.font = `500 22px ${FONT}`; ctx.fillText("곳의 음식점", x + cw / 2, cy0 + 210);
+    ctx.fillStyle = "#FFF4DC"; ctx.font = `800 ${n > 3 ? 46 : 60}px ${FONT}`; ctx.fillText(`${countIn(z)}`, x + cw / 2, cy0 + 165);
+    ctx.fillStyle = "#C9D2E6"; ctx.font = `500 22px ${FONT}`; ctx.fillText(exCats.size === 1 && exCats.has("음식") ? "곳의 음식점" : "곳의 점포", x + cw / 2, cy0 + 210);
     ctx.textAlign = "start";
   });
   ctx.fillStyle = "#8C9BBE"; ctx.font = `400 18px ${FONT}`; ctx.textAlign = "center";
-  ctx.fillText(`큰 점 = 음식점 · 자료: ${DATA.source} (${DATA.ref} 기준)`, W / 2, H - 50);
+  ctx.fillText(`표시: ${[...exCats].join("·")} · 자료: ${DATA.source} (${DATA.ref} 기준)`, W / 2, H - 50);
   ctx.textAlign = "start";
 }
 
@@ -413,10 +490,26 @@ async function renderExport() {
   (exType === "report" ? drawReport : drawPoster)($("exCanvas"), t, s2);
   $("exHint").textContent = exType === "report"
     ? "보고서·제안서에 넣는 가로형(1600×1000) 이미지입니다."
-    : "현수막·SNS·QR 안내용 세로형(1200×1650) 이미지입니다. 음식점 수는 상가정보 업종 대분류 '음식' 기준입니다.";
+    : "현수막·SNS·QR 안내용 세로형(1200×1650) 이미지입니다. 카드 숫자는 선택한 업종 기준(음식은 카페 포함)입니다.";
+}
+function buildChips() {
+  const cats = [...new Set(DATA.stores.map(s => s[3]))].sort();
+  $("exCats").innerHTML = "";
+  cats.forEach(c => {
+    const b = document.createElement("button"); b.textContent = c; b.setAttribute("aria-pressed", String(exCats.has(c)));
+    b.onclick = () => {
+      if (exCats.has(c) && exCats.size === 1) return;   // 최소 1개 유지
+      exCats.has(c) ? exCats.delete(c) : exCats.add(c);
+      b.setAttribute("aria-pressed", String(exCats.has(c))); renderExport();
+    };
+    $("exCats").appendChild(b);
+  });
 }
 function setExType(t) {
   exType = t;
+  const all = [...new Set(DATA.stores.map(s => s[3]))];
+  exCats = new Set(t === "poster" && all.includes("음식") ? ["음식"] : all);
+  buildChips();
   document.querySelectorAll("#exType button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.t === t)));
   [$("exTitle").value, $("exSub").value] = exDefaults();
   renderExport();
@@ -427,6 +520,7 @@ $("exportPanel").addEventListener("click", e => { if (e.target.id === "exportPan
 document.addEventListener("keydown", e => { if (e.key === "Escape") $("exClose").onclick(); });
 document.querySelectorAll("#exType button").forEach(b => b.onclick = () => setExType(b.dataset.t));
 ["exTitle", "exSub"].forEach(id => $(id).addEventListener("input", renderExport));
+["exCluster", "exSmooth", "exOutside"].forEach(id => $(id).addEventListener("change", renderExport));
 $("exSave").onclick = () => $("exCanvas").toBlob(async blob => {
   const name = `${($("exTitle").value.trim() || "상권지도").replace(/[\\/:*?"<>|]/g, "")}_${exType === "report" ? "보고서용" : "홍보용"}.png`;
   if (HOSTED && dl) { try { await dl.save({filename: name, data: blob}); } catch (e) {} return; }
